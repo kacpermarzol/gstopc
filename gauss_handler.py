@@ -4,6 +4,7 @@ import time
 
 from math import floor
 
+
 """
 These functions convert a gaussian scale and rotation into a covariance matrix.
 Originally provided: https://github.com/graphdeco-inria/gaussian-splatting
@@ -26,8 +27,8 @@ def strip_symmetric(sym):
 def build_rotation(q):
     #norm = torch.sqrt(r[:,0]*r[:,0] + r[:,1]*r[:,1] + r[:,2]*r[:,2] + r[:,3]*r[:,3])
     #q = r / norm[:, None]
-
-    R = torch.zeros((q.size(0), 3, 3), device='cuda')
+    device = q.device
+    R = torch.zeros((q.size(0), 3, 3), device=device)
 
     r = q[:, 0]
     x = q[:, 1]
@@ -47,7 +48,8 @@ def build_rotation(q):
     return R
 
 def build_scaling_rotation(s, r):
-    L = torch.zeros((s.shape[0], 3, 3), dtype=torch.float, device="cuda")
+    device = s.device
+    L = torch.zeros((s.shape[0], 3, 3), dtype=torch.float, device=device)
     R = build_rotation(r)
 
     L[:,0,0] = torch.exp(s[:,0])
@@ -126,7 +128,7 @@ class Gaussians():
         if mask is None:
             mask = torch.ones(covariances.shape[0], dtype=torch.bool)
 
-        eye_matrix = epsilon * torch.eye(3, device=self.xyz.get_device()).expand(mask.sum(), 3, 3)
+        eye_matrix = epsilon * torch.eye(3, device=self.xyz.device).expand(mask.sum(), 3, 3)
         covariances[mask] += eye_matrix
 
         return covariances

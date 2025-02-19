@@ -17,6 +17,7 @@ def load_ply_data(path, max_sh_degree=3):
     """
     Loads in Gaussians from .ply file
     """
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     plydata = PlyData.read(path)
 
     xyz = np.stack((np.asarray(plydata.elements[0]["x"]),
@@ -32,12 +33,12 @@ def load_ply_data(path, max_sh_degree=3):
 
     extra_f_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("f_rest_")]
     extra_f_names = sorted(extra_f_names, key = lambda x: int(x.split('_')[-1]))
-    assert len(extra_f_names)==3*(max_sh_degree + 1) ** 2 - 3
-    features_extra = np.zeros((xyz.shape[0], len(extra_f_names)))
-    for idx, attr_name in enumerate(extra_f_names):
-        features_extra[:, idx] = np.asarray(plydata.elements[0][attr_name])
+    #assert len(extra_f_names)==3*(max_sh_degree + 1) ** 2 - 3
+    #features_extra = np.zeros((xyz.shape[0], len(extra_f_names)))
+    #for idx, attr_name in enumerate(extra_f_names):
+    #    features_extra[:, idx] = np.asarray(plydata.elements[0][attr_name])
 
-    features_extra = features_extra.reshape((features_extra.shape[0], 3, (max_sh_degree + 1) ** 2 - 1))
+    #features_extra = features_extra.reshape((features_extra.shape[0], 3, (max_sh_degree + 1) ** 2 - 1))
 
     scale_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("scale_")]
     scale_names = sorted(scale_names, key = lambda x: int(x.split('_')[-1]))
@@ -51,15 +52,15 @@ def load_ply_data(path, max_sh_degree=3):
     for idx, attr_name in enumerate(rot_names):
         rots[:, idx] = np.asarray(plydata.elements[0][attr_name])
 
-    features_all = torch.cat((torch.tensor(features_dc, device="cuda:0"), torch.tensor(features_extra, device="cuda:0")), 2)
+    features_all = torch.tensor(features_dc, device=device)
 
     colours = computeColorFromLowDegSH(features_all)
 
-    opacities = (1 / (1 + torch.exp(torch.tensor(-opacities, device="cuda:0")))).type(torch.float).squeeze(1) # torch.full(opacities.shape, 0.05, device="cuda:0")-
+    opacities = (1 / (1 + torch.exp(torch.tensor(-opacities, device=device)))).type(torch.float).squeeze(1) # torch.full(opacities.shape, 0.05, device="cuda:0")-
 
-    xyz_tensor = torch.tensor(xyz, device="cuda:0")
-    scales_tensor = torch.tensor(scales, device="cuda:0")
-    rots_tensor = torch.tensor(rots/np.expand_dims(np.linalg.norm(rots, axis=1), 1), device="cuda:0") 
+    xyz_tensor = torch.tensor(xyz, device=device)
+    scales_tensor = torch.tensor(scales, device=device)
+    rots_tensor = torch.tensor(rots/np.expand_dims(np.linalg.norm(rots, axis=1), 1), device=device)
 
     return xyz_tensor, scales_tensor, rots_tensor, colours, opacities
 
