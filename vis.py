@@ -7,8 +7,9 @@ point_cloud = o3d.io.read_point_cloud(ply_file)
 
 # Convert the points to a NumPy array
 points = np.asarray(point_cloud.points)
+print(points.shape)
 
-k = 1000000
+k = 10000000
 subset_points = points[:k, :]
 
 subset_point_cloud = o3d.geometry.PointCloud()

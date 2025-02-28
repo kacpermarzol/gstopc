@@ -1,3 +1,4 @@
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import configargparse
@@ -6,6 +7,7 @@ import imageio
 from fontTools.subset import subset
 from ipywidgets.widgets.interaction import show_inline_matplotlib_plots
 from networkx.algorithms.cuts import conductance
+from superqt.utils import new_worker_qthread
 
 from tqdm import tqdm
 from math import floor
@@ -95,9 +97,9 @@ def mahalanobis(means, samples, covs):
 
     conv_inv = torch.inverse(covs)
     mm_cov_delta = torch.bmm(conv_inv, delta)
-    m = torch.bmm(torch.transpose(delta, 1, 2), mm_cov_delta)
+    m_ = torch.bmm(torch.transpose(delta, 1, 2), mm_cov_delta)
 
-    return torch.sqrt(m).squeeze(-1).squeeze(-1)
+    return torch.sqrt(m_).squeeze(-1).squeeze(-1)
 
 def calculate_bin_sizes(points_per_gaussian):
     """
@@ -134,7 +136,7 @@ def calculate_bin_sizes(points_per_gaussian):
 
     return start_bin, bin_size
 
-def create_new_gaussian_points(gaussians,gaussian_indices, num_points_to_sample, means, covariances, colours, m, sigmas, std_distance=2, num_attempts=5, normals=None, device="cuda:0"):
+def create_new_gaussian_points(gaussians, num_points_to_sample, means, covariances, colours, m, sigmas, std_distance=2, num_attempts=5, normals=None, device="cuda:0"):
     """
     Generates new points for each of the provided gaussians
 
@@ -151,12 +153,12 @@ def create_new_gaussian_points(gaussians,gaussian_indices, num_points_to_sample,
         new_points: sampled 3D points over all gaussians
         new_colours: colours of the 3D points
     """
-    
     # Number of points that should be generated over all gaussians
     total_required_points = num_points_to_sample * means.shape[0]
 
     # Tracks the number of points that have been added for each gaussian
     # Ensures that the exact number of required points is added for each gaussian
+
     added_points = torch.zeros(means.shape[0], device=device, dtype=torch.long)
 
     # The maximum number of points that can be added for each gaussian
@@ -166,47 +168,45 @@ def create_new_gaussian_points(gaussians,gaussian_indices, num_points_to_sample,
     new_colours = torch.tensor([], device=device).type(torch.double)
     new_normals =  torch.tensor([], device=device).type(torch.double) if normals is not None else None
 
-    i = 0
-
+    j = 0
     # Loop until all required points have been sampled or the maximium number of attempts has been exceeded
-    while new_points.shape[0] < total_required_points and i < num_attempts:
-
-        # Get gaussians which do not curretly have the maximum number of points to be sampled from
-
-
-
-
-        gaussians_to_add = added_points != num_points_to_sample  
+    while new_points.shape[0] < total_required_points and j < num_attempts:
+        gaussians_to_add = added_points != num_points_to_sample
         new_means_for_point = means[gaussians_to_add]
         new_covariances_for_point = covariances[gaussians_to_add]
         new_colours_for_point = colours[gaussians_to_add]
         new_normals_for_point = normals[gaussians_to_add] if normals is not None else None
-        m = m[gaussians_to_add]
-        sigmas = sigmas[gaussians_to_add]
+        m_ = m[gaussians_to_add]
+        sigmas_ = sigmas[gaussians_to_add]
 
 
         gaussians_to_add_idxs = gaussians_to_add.nonzero().squeeze(1)
         # Sample 'num_points_to_sample' number of points for each gaussian
-        t_dist = Normal(m, sigmas.squeeze(-1))
-        t_sample = t_dist.sample((num_points_to_sample,))
+        t_dist = Normal(m_, sigmas_.squeeze(-1))
+        t_sample_org = t_dist.sample((num_points_to_sample,))
+        t_sample = t_sample_org.reshape(-1,1)
 
 
-        poly_weights = torch.chunk(gaussians._w1[gaussian_indices][gaussians_to_add], chunks=gaussians.polynomial_degree, dim=-1)
-        center_gaussians = m - t_sample
-        means2d= new_means_for_point[:, [0, -1]]
+        weights = torch.repeat_interleave(gaussians._w1[gaussians_to_add], num_points_to_sample, dim=0)
+        poly_weights = torch.chunk(weights, chunks=gaussians.polynomial_degree, dim=-1)
+        m_repeated = torch.repeat_interleave(m_, num_points_to_sample,dim=0)
+        center_gaussians = m_repeated - t_sample
+
+        means2d = torch.repeat_interleave(new_means_for_point[:, [0, -1]], num_points_to_sample,dim=0)
         for i, poly_weight in enumerate(poly_weights):
-            means2d = means2d + poly_weight.unsqueeze(0) * (center_gaussians ** (i + 1))
+            means2d = means2d + poly_weight * (center_gaussians ** (i + 1))
 
-        numerator = t_dist.log_prob(t_sample).exp()
-        denominator = t_dist.log_prob(m).exp()
+
+        numerator = t_dist.log_prob(t_sample_org).exp()
+        denominator = t_dist.log_prob(m_).exp()
 
         a = numerator / denominator
 
-        means2d = means2d.transpose(0, 1).squeeze(1).reshape(-1,2)
-
+        # means2d = means2d.transpose(0, 1).squeeze(1).reshape(-1,2)
+        means2d = means2d.reshape(-1,2)
         means_repeated = torch.repeat_interleave(new_means_for_point[:, [0, -1]], num_points_to_sample,dim=0)
         mean_s_given_t = means_repeated + means2d
-        covariances_repeated = torch.repeat_interleave(covariances, num_points_to_sample,dim=0)
+        covariances_repeated = torch.repeat_interleave(new_covariances_for_point, num_points_to_sample,dim=0)
         cov_s_given_t = covariances_repeated * a.reshape(-1,1,1)
 
         conditional_s_given_t = MultivariateNormal(mean_s_given_t.squeeze(0), cov_s_given_t)
@@ -217,14 +217,13 @@ def create_new_gaussian_points(gaussians,gaussian_indices, num_points_to_sample,
         # repeated_means = torch.repeat_interleave(means2d, num_points_to_sample, dim=0)
 
         repeated_covariances = torch.repeat_interleave(new_covariances_for_point, num_points_to_sample, dim=0)
-        mahalanobis_distances = mahalanobis(means_repeated, sampled_points, repeated_covariances)
+        mahalanobis_distances = mahalanobis(mean_s_given_t, sampled_points, cov_s_given_t)
         sampled_points = torch.cat((sampled_points[:, 0, None], t_sample.reshape(-1,1), sampled_points[:,-1, None]), dim=1)
-
 
         # Get the mahalanobis distance between the point and its centre gaussian        
 
         # Filter out points with a distance less than the set std_distance
-        std_distance = 2
+        std_distance = 1
         filtered_samples_idxs = mahalanobis_distances <= std_distance
         filtered_samples = sampled_points[filtered_samples_idxs]
 
@@ -251,7 +250,6 @@ def create_new_gaussian_points(gaussians,gaussian_indices, num_points_to_sample,
         grouped_idxs = torch.arange(sampled_points.shape[0], device=device)[filtered_samples_idxs].type(torch.float)
         grouped_idxs = torch.floor(torch.div(grouped_idxs, num_points_to_sample))
         counted_idxs, counts = torch.unique(grouped_idxs, return_counts=True)
-
 
         # Add gaussians that have not been sampled, due to already having enough points, to the count with a value of 0
         # This ensures that the tensors of the added points and counts are the same size
@@ -289,17 +287,20 @@ def create_new_gaussian_points(gaussians,gaussian_indices, num_points_to_sample,
         added_points = torch.where(added_points > num_points_to_sample, num_points_to_sample, added_points).type(torch.long)
 
         new_points = torch.cat((new_points, current_points), 0)
+
         new_colours = torch.cat((new_colours, current_colours), 0)
 
         if normals is not None:
             current_normals = torch.empty((total_current_points, new_normals_for_point.size(1)), dtype=new_normals_for_point.dtype, device=device)
             current_normals[:] = new_normals_for_point.repeat_interleave(diffs, dim=0) 
             new_normals = torch.cat((new_normals, current_normals), 0)
-        i += 1
+        j += 1
+
+
 
     return new_points, new_colours, new_normals
 
-def generate_pointcloud(gaussians, num_points, std_distance=2, exact_num_points=False, calculate_normals=False, num_sample_attempts=5, device="cuda:0"):
+def generate_pointcloud(gaussians, num_points, std_distance=2, exact_num_points=50, calculate_normals=False, num_sample_attempts=5, device="cuda:0"):
 
     """
     Generates a pointcloud from a set of gaussians
@@ -320,6 +321,7 @@ def generate_pointcloud(gaussians, num_points, std_distance=2, exact_num_points=
     """
 
     # Calculate Gaussian sizes
+    print(exact_num_points)
     gaussian_sizes = gaussians.get_gaussian_sizes()
 
     print(f"Distributed Points to Gaussians")
@@ -329,11 +331,13 @@ def generate_pointcloud(gaussians, num_points, std_distance=2, exact_num_points=
 
     point_distribution = torch.unique(points_per_gaussian)
 
+
     # Bin gaussians together (makes the generation process much faster)
     if not exact_num_points:
         start_bin, bin_size = calculate_bin_sizes(points_per_gaussian)
 
         point_distribution = torch.cat((point_distribution[:start_bin],  torch.mul(torch.unique(torch.ceil(point_distribution[start_bin:]/ bin_size)), bin_size)), 0)
+
 
     total_points = torch.tensor([], device=device)
     total_colours = torch.tensor([], device=device).type(torch.double)
@@ -342,51 +346,28 @@ def generate_pointcloud(gaussians, num_points, std_distance=2, exact_num_points=
     print(f"Starting Point Cloud Generation")
 
     # Iterate through different number of points 
-    for i in tqdm(range(point_distribution.shape[0]), position=0, leave=True):
-        start_range = point_distribution[i]
+    covariances_for_point = gaussians.get_covariance()
+    cov_matrices = torch.zeros(covariances_for_point.shape[0], 2, 2)
+    cov_matrices[:, 0, 0] = covariances_for_point[:, 0]  # (0, 0)
+    cov_matrices[:, 0, 1] = covariances_for_point[:, 2]  # (0, 1)
+    cov_matrices[:, 1, 0] = covariances_for_point[:, 2]  # (0, 1)
+    cov_matrices[:, 1, 1] = covariances_for_point[:, 5]  # (1, 1)
 
-        if i != point_distribution.shape[0]-1:
-            end_range = point_distribution[i+1]
-        else:
-            end_range = start_range+1
-
-        # Get gaussians with assigned number of points between the start and end
-        gaussian_indices = torch.where((points_per_gaussian >= start_range) & (points_per_gaussian < end_range))[0]
-
-        # Number of points to generate for that gaussian
-        num_points_for_gaussian = floor(start_range + (end_range-start_range)/2)
-
-        if num_points_for_gaussian <= 0:
-            continue
-
-        if gaussian_indices.shape[0] < 1:
-            continue
-
-        # All gaussians which have the number of assigned points between the start and end range
-        covariances_for_point = gaussians.get_covariance()[gaussian_indices]
-
-        cov_matrices = torch.zeros(covariances_for_point.shape[0], 2, 2)
-        cov_matrices[:, 0, 0] = covariances_for_point[:, 0]  # (0, 0)
-        cov_matrices[:, 0, 1] = covariances_for_point[:, 2]  # (0, 1)
-        cov_matrices[:, 1, 0] = covariances_for_point[:, 2]  # (0, 1)
-        cov_matrices[:, 1, 1] = covariances_for_point[:, 5]  # (1, 1)
-
-        mean_for_point = gaussians.get_xyz[gaussian_indices]
-        centre_colours = gaussians.colours[gaussian_indices]
-        m = gaussians.get_m[gaussian_indices]
-        sigmas = gaussians.get_sigma[gaussian_indices]
+    mean_for_point = gaussians.get_xyz
+    centre_colours = gaussians.colours
+    m = gaussians.get_m
+    sigmas = gaussians.get_sigma
 
 
-        normals_for_point = gaussians.normals[gaussian_indices] if calculate_normals else None
+    normals_for_point = gaussians.normals if calculate_normals else None
 
         # First point to use is the centre of the gaussian
-        total_points = torch.cat((total_points, mean_for_point), 0)
-        total_colours = torch.cat((total_colours, centre_colours), 0)
-        if calculate_normals:
+    total_points = torch.cat((total_points, mean_for_point), 0)
+    total_colours = torch.cat((total_colours, centre_colours), 0)
+    if calculate_normals:
             total_normals = torch.cat((total_normals, normals_for_point), 0)
 
-        if num_points_for_gaussian <= 1:
-            continue
+
 
             # All gaussians which have the number of assigned points between the start and end range
         # covariances_for_point = gaussians.covariances[gaussian_indices]
@@ -405,17 +386,16 @@ def generate_pointcloud(gaussians, num_points, std_distance=2, exact_num_points=
 
         # Sample the rest of the required points
         # !!!
-        new_points, new_colours, new_normals = create_new_gaussian_points(gaussians,gaussian_indices, num_points_for_gaussian-1, mean_for_point, cov_matrices,
+    new_points, new_colours, new_normals = create_new_gaussian_points(gaussians, exact_num_points, mean_for_point, cov_matrices,
                                                              centre_colours, m, sigmas, std_distance=std_distance, num_attempts=num_sample_attempts,
                                                              normals=normals_for_point, device=device)
 
-        total_points = torch.cat((total_points, new_points), 0)
-        total_colours = torch.cat((total_colours, new_colours), 0)
- 
-        if calculate_normals:
-            total_normals = torch.cat((total_normals, new_normals), 0)
+    
 
-    return total_points, total_colours, total_normals
+    if calculate_normals:
+        total_normals = torch.cat((total_normals, new_normals), 0)
+
+    return new_points, new_colours, new_normals
 
 
 def convert_3dgs_to_pc(input_path, transform_path, pointcloud_settings):
@@ -526,7 +506,7 @@ def convert_3dgs_to_pc(input_path, transform_path, pointcloud_settings):
         print()
 
         # Number of attempts per point number generation
-        num_sample_attempts = 5 if not pointcloud_settings.exact_num_points else 100
+        num_sample_attempts = 6 if not pointcloud_settings.exact_num_points else 100
 
         print("Starting Point Cloud Generation for All Gaussians")
         print()
@@ -685,7 +665,7 @@ def main():
         cull_large_percentage=args.cull_gaussian_sizes, 
         colour_resolution=int(COLOR_QUALITY_OPTIONS[args.colour_quality.lower()]),
         max_sh_degree=args.max_sh_degree, 
-        exact_num_points = args.exact_num_points,
+        exact_num_points = 100,
         generate_mesh = args.generate_mesh,
         remove_unrendered_gaussians = True,
         device="cuda:0" if torch.cuda.is_available() else "cpu"
